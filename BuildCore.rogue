@@ -1,0 +1,836 @@
+# To run this build file, install Rogue from github.com/brombres/Rogue then cd
+# to this folder and type "rogo" at the command line, or "rogo help" for a list
+# of supported commands.
+
+#$ LIBRARIES(macOS) = scons
+
+$requireRogue "2.18"
+
+uses Utility/FilePatcher
+uses Utility/VersionNumber
+
+augment Build
+  # You can create a Local.rogo file with overrides for these values, e.g.:
+  #   AUTOLAUNCH = "path/to/project/folder"
+  PROPERTIES
+    AUTOLAUNCH = ""  # Godot project path to auto-launch after a default 'rogo' build.
+endAugment
+
+routine rogo_default
+  # Builds and runs the editor for the current platform.
+  build( "editor" )
+  rogo_run
+endRoutine
+
+# 'rogo help build' custom per-OS description
+block
+  local desc = ...
+    @|Builds the Godot editor and/or export templates for the specified platforms.
+     |
+     |TARGETS
+     |  products:      [editor|templates]
+     |  platforms:     [$PLATFORMS]
+     |  modes:         [debug|release|dist]
+     |
+     |DESCRIPTION
+     |  Any combination of target options can be given. By example:
+     |
+
+  desc += table(
+    [
+      ["rogo build","Builds the editor for the current OS."],
+      ["rogo build macos web","Builds the editors for macOs and Web."],
+      ["rogo build templates","Builds the export templates for the current OS in debug mode."],
+      ["rogo build templates ios macos release","Builds the export templates for iOS and macOS in release mode."],
+      ["rogo build dist","Builds and packages editors and templates for all platforms in both debug and release mode."],
+      ["rogo build dist editor","Builds and packages editors for all platforms."],
+      ["rogo build dist templates","Builds and packages templates for all platforms in both debug and release mode."],
+      ["rogo build dist macos","Builds and packages the macOS editor and templates in both debug and release mode."],
+      ["rogo build dist macos editor","Builds and packages the editor for macOS."]
+    ],
+    Console.width.or_smaller(100) - 2
+  ).indented( 2 )
+  desc .= replacing( "$PLATFORMS", ["all"].[add(supported_platforms)].join('|') )
+
+  description( "build", desc )
+endBlock
+
+routine rogo_build
+  # SYNTAX: rogo build [targets]
+  local targets = System.command_line_arguments.cloned.[ remove_first ].join( '.' )
+  build( targets )
+endRoutine
+
+routine build( targets:String )
+  rogo_deps
+
+  local config = BuildConfig( targets )
+  local make_dist = config.make_dist
+
+  forEach (platform in config.platforms)
+    which (platform)
+      case "android"
+        local sdk = System.env//ANDROID_SDK_ROOT
+        if (not sdk)
+          sdk = System.env//ANDROID_HOME
+          if (sdk)
+            throw Error( "[ANDROID] ANDROID_SDK_ROOT is undefined. Set it to '$'."(sdk) )
+          else
+            throw Error( "[ANDROID] Cannot locate Android SDK. Install via Android Studio and ensure that environment variable ANDROID_SDK_ROOT exists." )
+          endIf
+        endIf
+        if (not File(sdk/"cmdline-tools").exists)
+          throw Error( "[ANDROID] Command line tools are not installed. Use Android Studio to install them." )
+        endIf
+      case "web"
+        if (not System.find_executable("em++"))
+          throw Error( "[Web] Cannot locate 'em++' compiler. Ensure 'emscripten' is installed." )
+        endIf
+    endWhich
+
+    forEach (product in config.products)
+      if (product == "editor" and not BuildConfig.EDITOR_PLATFORMS.contains(platform)) nextIteration
+      local architectures = config.architectures
+      if (architectures.is_empty)
+        if (make_dist or product == "template") architectures = all_architectures( platform )
+        else                                    architectures = String[][null]
+      endIf
+      forEach (architecture in architectures)
+        local modes = config.modes
+        if (modes.is_empty)
+          if (product == "editor")
+            modes = [ "release" ]
+          else
+            if (make_dist) modes = [ "debug", "release" ]
+            else           modes = [ "debug" ]
+          endIf
+        endIf
+        forEach (mode in modes)
+          local platform_name = BuildConfig.PLATFORM_NAMES[platform]
+          which (platform)
+          endWhich
+          local product_name = which{ product=="editor":"editor" || "export template" }
+          local arch = which{ architecture || "" }
+          local is_sim = platform == "ios" and arch == "x86_64"
+          local sim = which{ is_sim:"simulator" || "" }
+          header "Building $ $ [$]"(platform_name,product_name,arch.appending(mode).appending(sim))
+
+          local cmd = "scons platform=$"(platform)
+          if (arch != "") cmd .= appending( "arch=$"(arch) )
+          if (product == "editor")
+            cmd .= appending( "target=editor" )
+          else
+            cmd .= appending( "target=template_$"(mode) )
+            if (is_sim) cmd .= appending( "ios_simulator=yes" )
+          endIf
+          if (System.is_macos) cmd .= appending( "vulkan_sdk_path=Libraries/MoltenVK" )
+          if (make_dist and mode == "release") cmd .= appending( "production=yes" )
+          execute cmd
+        endForEach
+      endForEach
+    endForEach
+  endForEach
+
+  #rogo_sync_templates
+
+  if (make_dist)
+    package
+  endIf
+endRoutine
+
+routine rogo_dist
+  # Shorthand for 'rogo build dist'
+  build( System.command_line_arguments.cloned.join( '.' ) )  # includes 'dist' target
+endRoutine
+
+routine package
+  if (System.is_macos)
+    package_macos
+  else
+    trace "TODO"
+  endIf
+endRoutine
+
+routine package_macos
+  if (Files("bin/godot.macos.editor.*").any_newer_than("bin/godot.macos.editor.universal"))
+    header "Building editor [macOS universal binary]"
+    execute @|lipo -create bin/godot.macos.editor.x86_64 bin/godot.macos.editor.arm64 -output bin/godot.macos.editor.universal
+  endIf
+
+  local folder = File( "Build/macOS" )
+  folder.create_folder
+  (folder/"Godot.app/Contents/MacOS").create_folder
+
+  Files( "misc/dist/macos_tools.app/**" ).sync_to( File("Build/macOS/Godot.app"), &keep_unused, &verbose )
+
+  execute @|cp bin/godot.macos.editor.universal Build/macOS/Godot.app/Contents/MacOS/Godot
+  execute @|chmod +x Build/macOS/Godot.app/Contents/MacOS/Godot
+  header "Build Complete: Build/macOS/Godot.app"
+endRoutine
+
+routine template_folder->File
+  if (System.is_macos)
+    return File( "~/Library/Application Support/Godot/export_templates/$"(version) )
+  else
+    trace "TODO"
+    throw Error( "TODO" )
+  endIf
+endRoutine
+
+routine rogo_run
+  # Runs the most recent editor build for the current platform. If file Local.rogo exists and
+  # contains the line 'AUTOLAUNCH = "path/to/project/folder"', that project will be opened when the
+  # editor runs.
+  if (System.is_macos)
+    local exe_arch = File( "bin/godot.macos.editor.$"(Process.run("uname -m",&env)->String.trimmed) )
+    local exe_universal = File( "bin/godot.macos.editor.universal" )
+    local exe : File
+    if (exe_arch.exists)
+      if (exe_universal.exists)
+        if (exe_universal.is_newer_than(exe_arch)) exe = exe_universal
+        else                                       exe = exe_arch
+      else
+        exe = exe_arch
+      endIf
+    elseIf (exe_universal.exists)
+      exe = exe_universal
+    else
+      throw Error( "[ERROR] No compatible macOS build product exists." )
+    endIf
+
+    if (String.exists(Build.AUTOLAUNCH))
+      local project = File( Build.AUTOLAUNCH )
+      contingent
+        necessary (project.exists)
+        if (not project.filepath.ends_with("project.godot"))
+          project /= "project.godot"
+          necessary (project.exists)
+        endIf
+        execute "$ $"(exe,project.esc)
+      unsatisfied
+        throw Error( "[ERROR] Cannot find autolaunch project '$'."(project) )
+      endContingent
+    else
+      execute exe
+    endIf
+
+  else
+    trace "TODO"
+
+  endIf
+endRoutine
+
+routine rogo_clean
+  # Deletes the 'bin', 'Build' and '.rogo' folders.
+  forEach (folder in ["bin","Build",".rogo"])
+    local file = File( folder )
+    if (file.exists)
+      println "[DELETE] $"(folder)
+      file.delete
+    endIf
+  endForEach
+endRoutine
+
+routine version->String
+  local v = String( File("version.py") )
+  local parts = v.extract_strings( "*major = $(I)*minor = $(I)*patch = $(I)*" )
+  local status = v.extract_string( ''*status = "$"*'' )
+  return "$.$"(parts.join('.'),status)
+endRoutine
+
+routine rogo_version( new_version="":String, new_status="":String )
+  # SYNTAX: rogo version [version [status]]
+  # Displays or changes the Godot version number in all applicable files.
+  # Call without arguments to display the current version number.
+  if (not String.exists(new_version))
+    println version
+    return
+  endIf
+
+  local v = new_version
+
+  block patcher = FilePatcher( File("version.py") )
+    local parts = v.split( '.' )
+    while (parts.count < 3) parts.add( '0' )
+    patcher.replace( "major =", "major = $"(parts[0]) )
+    patcher.replace( "minor =", "minor = $"(parts[1]) )
+    patcher.replace( "patch =", "patch = $"(parts[2]) )
+    if (String.exists(new_status)) patcher.replace( "status =", ''status = "$"''(new_status) )
+    patcher.save
+  endBlock
+
+  block patcher = FilePatcher( File("misc/dist/macos_tools.app/Contents/Info.plist") )
+    if local i = patcher.locate( "<key>CFBundleShortVersionString</key>" )
+      patcher.replace( i+1, "<string>$</string>"(v) )
+    endIf
+    if local i = patcher.locate( "<key>CFBundleVersion</key>" )
+      patcher.replace( i+1, "<string>$</string>"(v) )
+    endIf
+    patcher.save
+  endBlock
+
+  block patcher = FilePatcher( File("misc/dist/windows/godot.iss") )
+    patcher.replace( "#define MyAppVersion", ''#define MyAppVersion "$"''(v) )
+    patcher.save
+  endBlock
+
+  block patcher = FilePatcher( File("modules/mono/editor/Godot.NET.Sdk/Godot.NET.Sdk/Godot.NET.Sdk.csproj") )
+    patcher.replace( "<Version>", "<Version>$</Version>"(v) )
+    patcher.save
+  endBlock
+
+  block patcher = FilePatcher( File("modules/mono/editor/Godot.NET.Sdk/Godot.SourceGenerators/Godot.SourceGenerators.csproj") )
+    patcher.replace( "<Version>", "<Version>$</Version>"(v) )
+    patcher.save
+  endBlock
+
+  block patcher = FilePatcher( File("modules/mono/glue/GodotSharp/GodotSharp/GodotSharp.csproj") )
+    patcher.replace( "<Version>", "<Version>$</Version>"(v) )
+    patcher.save
+  endBlock
+
+  block patcher = FilePatcher( File("modules/mono/glue/GodotSharp/GodotSharpEditor/GodotSharpEditor.csproj") )
+    patcher.replace( "<Version>", "<Version>$</Version>"(v) )
+    patcher.save
+  endBlock
+
+endRoutine
+
+routine rogo_deps
+  # Installs any missing dependencies (specifically: MoltenVK on macOS).
+  install_moltenvk
+endRoutine
+
+routine install_moltenvk( &rebuild )
+  if (not System.is_macos) return
+
+  if (not File("Libraries/MoltenVK").exists)
+    header "Cloning MoltenVK library"
+    execute @|git clone https://github.com/KhronosGroup/MoltenVK.git Libraries/MoltenVK
+  endIf
+
+  if (rebuild or not File("Libraries/MoltenVK/External").exists)
+    execute @|cd Libraries/MoltenVK && ./fetchDependencies --macos --ios --iossim
+  endIf
+
+  if (rebuild or not File("Libraries/MoltenVK/Package/Release/MoltenVK/MoltenVK.xcframework/macos-arm64_x86_64").exists)
+    header "Building MoltenVK for macOS"
+    local cmd = "cd Libraries/MoltenVK"
+    execute @|cd Libraries/MoltenVK && make macos
+  endIf
+
+  if (rebuild or not File("Libraries/MoltenVK/Package/Release/MoltenVK/MoltenVK.xcframework/ios-arm64").exists)
+    header "Building MoltenVK for iOS"
+    execute @|cd Libraries/MoltenVK && make ios
+  endIf
+
+  if (rebuild or not File("Libraries/MoltenVK/Package/Release/MoltenVK/MoltenVK.xcframework/ios-arm64_x86_64-simulator").exists)
+    header "Building MoltenVK for iOS Simulator"
+    execute @|cd Libraries/MoltenVK && make iossim
+  endIf
+endRoutine
+
+routine supported_platforms->String[]
+  if (System.is_macos)
+    return ["android","ios","macos","web"]
+  elseIf (System.is_windows)
+    return ["android","web","windows"]
+  else
+    # Assume Linux
+    return ["android","linux","web"]
+  endIf
+endRoutine
+
+routine supported_architectures( platform:String )->String[]
+  which (platform)
+    case "android"
+      return ["x86_64","arm64"]
+    case "ios"
+      return ["x86_64","arm64"]
+    case "linux"
+      return ["x86_64","arm64","rv64"]
+    case "macos"
+      return ["x86_64","arm64"]
+    case "web"
+      return ["wasm32"]
+    case "windows"
+      return ["x86_32","x86_64"]
+    others
+      throw Error( "[ERROR] Unsupported platform '$'."(platform) )
+  endWhich
+  return null
+endRoutine
+
+routine all_architectures( platform:String )->String[]
+  which (platform)
+    case "android"
+      return ["x86_64","arm64"]
+    case "ios"
+      return ["x86_64","arm64"]
+    case "linux"
+      return ["x86_64","arm64","rv64"]
+    case "macos"
+      return ["x86_64","arm64"]
+    case "web"
+      return ["wasm32"]
+    case "windows"
+      return ["x86_32","x86_64"]
+    others
+      throw Error( "[ERROR] Unsupported platform '$'."(platform) )
+  endWhich
+  return null
+endRoutine
+
+routine default_os->String
+  return System.os.to_lowercase
+endRoutine
+
+routine header( title:String )
+  local n = Console.width.or_smaller(100)
+  println "┌$┐" ("─"*(n-2))
+  println "│$$│"(title," "*(n-(title.count+2)))
+  println "└$┘" ("─"*(n-2))
+endRoutine
+
+routine table( contents:String[][], total_w:Int32 )->String
+  local w0 = 0
+  w0 .= or_larger( (forEach in contents)[0].count )
+  local w1 = 0
+  w1 .= or_larger( (forEach in contents)[1].count )
+
+  if (w0 + w1 + 3 > total_w)
+    w0 .= or_smaller( (total_w-3)/2 )
+    w1 = (total_w - 3 - w0)
+  endIf
+
+  local builder = String()
+  builder.print "┌"
+  loop (w0) builder.print "─"
+  builder.print "┬"
+  loop (w1) builder.print "─"
+  builder.println "┐"
+  forEach (row at j in contents)
+    if (j > 0)
+      builder.print "├"
+      loop (w0) builder.print "─"
+      builder.print "┼"
+      loop (w1) builder.print "─"
+      builder.println "┤"
+    endIf
+    local col0 = row[0].word_wrap( w0 ).iterator
+    local col1 = row[1].word_wrap( w1 ).iterator
+    while (col0.has_another or col1.has_another)
+      builder.print   "│"
+      builder.print   which{col0.has_another:col0.read||""}.justified(-w0)
+      builder.print   "│"
+      builder.print   which{col1.has_another:col1.read||""}.justified(-w1)
+      builder.println "│"
+    endWhile
+  endForEach
+  builder.print "└"
+  loop (w0) builder.print "─"
+  builder.print "┴"
+  loop (w1) builder.print "─"
+  builder.print "┘"
+  return builder
+endRoutine
+
+routine execute( commands:String, error_message=null:String, &suppress_error )->Logical
+  forEach (cmd in LineReader(commands))
+    print( "> " )
+    println( cmd )
+    if (0 != System.run(cmd))
+      if (suppress_error)
+        return false
+      else
+        if (not error_message) error_message = "Build failed."
+        throw Error( error_message )
+      endIf
+    endIf
+  endForEach
+  return true
+endRoutine
+
+class BuildConfig
+  GLOBAL PROPERTIES
+    PRODUCTS         = ["editor","template","templates"]
+    EDITOR_PLATFORMS = ["linux","macos","uwp","web","windows"]
+    PLATFORMS        = ["all","android","ios","javascript","js","linux","macos","uwp","web","windows"]
+    ARCHITECTURES    = ["x86_32","x86_64","arm32","arm64","rv64","ppc32","ppc64","wasm32"]
+    MODES            = ["debug","release","dist","distributable"]
+    ALIASES = { "distributable":"dist", "templates":"template", "javascript":"web", "js":"web" } : [String:String]
+    PLATFORM_NAMES = { "android":"Android", "ios":"iOS", "linux":"Linux", "macos":"macOS",
+                       "uwp":"UWP", "web":"Web", "windows":"Windows" } : [String:String]
+
+  PROPERTIES
+    products = String[]
+    platforms = String[]
+    architectures = String[]
+    modes = String[]
+    make_dist : Logical
+
+  METHODS
+    method init( target_string:String )
+      if (not String.exists(target_string)) target_string = "default"
+
+      localize supported_platforms
+
+      local targets = target_string.split('.')
+      forEach (target in targets)
+        if (target == "default") nextIteration
+        if (target == "all")
+          platforms.add( supported_platforms )
+          nextIteration
+        endIf
+
+        if (ALIASES.contains(target)) target = ALIASES[ target ]
+
+        if (PRODUCTS.contains(target))
+          if (not products.contains(target)) products.add( target )
+        elseIf (PLATFORMS.contains(target))
+          if (not supported_platforms.contains(target))
+            throw Error( "Invalid platform target '$'. Valid platforms on $ are [$]."...
+                         (target,System.os,supported_platforms.join("|")) )
+          endIf
+          if (not platforms.contains(target)) platforms.add( target )
+        elseIf (ARCHITECTURES.contains(target))
+          if (not architectures.contains(target)) architectures.add( target )
+        elseIf (MODES.contains(target))
+          if (not modes.contains(target)) modes.add( target )
+        else
+          throw Error( "[ERROR] Invalid target: '$'."(target) )
+        endIf
+      endForEach
+
+      if (modes.contains("dist"))
+        make_dist = true
+        modes.remove( "dist" )
+      endIf
+
+      if (make_dist)
+        if (platforms.is_empty) platforms.add( supported_platforms )
+        if (products.is_empty) products.[ add("editor"), add("template") ]
+      else
+        if (platforms.is_empty) platforms.add( default_os )
+        if (products.is_empty)
+          contingent
+            necessary (EDITOR_PLATFORMS.contains(forEach in platforms))
+            products.add( "editor" )
+          unsatisfied
+            products.add( "template" )
+          endContingent
+        elseIf (products.contains("editor"))
+          forEach (p in platforms)
+            if (not EDITOR_PLATFORMS.contains(p))
+              throw Error( "[ERROR] Editor not supported on platform '$'."(p) )
+            endIf
+          endForEach
+        endIf
+      endIf
+
+      if (architectures.count)
+        forEach (arch in architectures)
+          forEach (p in platforms)
+            if (not supported_architectures(p).contains(arch))
+              throw Error( "[ERROR] Platform '$' does not support architecture '$'."(p,arch) )
+            endIf
+          endForEach
+        endForEach
+      endIf
+
+endClass
+
+#-------------------------------------------------------------------------------
+# Introspection-based Launcher Framework
+#-------------------------------------------------------------------------------
+# Rogo is a "build your own build system" facilitator. At its core Rogo just
+# recompiles build files if needed and then runs the build executable while
+# forwarding any command line arguments. This file contains a default framework
+# which uses introspection to turn command line arguments into parameterized
+# routine calls.
+
+# Example: to handle the command "rogo abc xyz 5", define
+# "routine rogo_abc_xyz( n:Int32 )".
+
+# "rogo_default" will run in the absence of any other command line argument.
+
+# The following "comment directives" can be used in this file to control how
+# RogueC compiles it and to manage automatic dependency installation and
+# linking.
+
+# Each of the following should be on a line beginning with the characters #$
+# (preceding whitespace is fine). Sample args are given.
+
+#   ROGUEC       = roguec       # Path to roguec to compile this file with
+#   ROGUEC_ARGS  = --whatever   # Additional options to pass to RogueC
+#   CC           = gcc -Wall -fno-strict-aliasing
+#   CC_ARGS      = -a -b -c          # Additional C args
+#   LINK         = -lalpha -lbeta    # Link this build file with these options
+#   LINK(macOS)  = ...               # Options applying only to
+#                                    # System.os=="macOS" (use with any OS and
+#                                    # any comment directive)
+#   LINK_LIBS    = true              # Links following LIBRARIES with this Build
+#                                    # file (otherwise just installs them)
+#   LINK_LIBS    = false             # Linking turned off for following
+#                                    # LIBRARIES - info can still be obtained
+#                                    # from $LIBRARY_FLAGS or $LIBRARIES(libname,...)
+#   LIBRARIES    = libalpha
+#   LIBRARIES    = libbeta(library-name)
+#   LIBRARIES    = libfreetype6-dev(freetype2)
+#   DEPENDENCIES = Library/Rogue/**/*.rogue
+#
+#   LIBRARIES    = name(package)
+#   LIBRARIES    = name(
+#                    exe:<which-name>
+#                    exists-cmd:<exists-cmd>
+#                    flags:<library-flags>
+#                    ignore-exe-only:<setting>
+#                    info:<info-name>
+#                    info-cmd:<get-info-cmd>
+#                    install:<install-name>
+#                    install-cmd:<install-cmd>
+#                    link:<setting>
+#                    package:<package-name>
+#                  )
+#
+# The following macro is replaced within this file (Build.rogue) - the libraries
+# should normally also be declared in #$ LIBRARIES:
+#
+#   $LIBRARY_FLAGS(lib1,lib2)                              # sample macro
+#     ->
+#   -Ipath/to/lib1/include -Lpath/to/lib1/library -I ...   # sample replacement
+
+routine syntax( command:String, text:String )
+  Build.rogo_syntax[ command ] = text
+endRoutine
+
+routine description( command:String, text:String )
+  Build.rogo_descriptions[ command ] = text
+endRoutine
+
+routine help( command:String, description_text=null:String, syntax_text=null:String )
+  if (description_text) description( command, description_text )
+  if (syntax_text)      syntax( command, syntax_text )
+endRoutine
+
+try
+  Build.launch
+catch (err:Error)
+  Build.rogo_error = err
+  Build.on_error
+endTry
+
+class Build [singleton]
+  PROPERTIES
+    rogo_syntax         = [String:String]
+    rogo_descriptions   = [String:String]
+    rogo_prefix         = "rogo_"
+    rogo_command        = "default"
+    rogo_args           = @[]
+    rogo_error          : Error
+
+    LOCAL_SETTINGS_FILE = "Local.rogo"
+
+  METHODS
+    method launch
+      rogo_args.add( forEach in System.command_line_arguments )
+      read_defs
+      on_launch
+      parse_args
+      dispatch_command
+
+    method dispatch_command
+      local m = find_command( rogo_command )
+      if (not m) throw Error( "No such routine rogo_$()" (rogo_command) )
+
+      local args = @[]
+      forEach (arg in rogo_args)
+        which (arg)
+          case "true":  args.add( true )
+          case "false": args.add( false )
+          case "null":  args.add( null )
+          others:       args.add( arg )
+        endWhich
+      endForEach
+      m( args )
+
+    method find_command( name:String )->MethodInfo
+      return <<Routine>>.find_global_method( rogo_prefix + name )
+
+    method on_error
+      local w = Console.width.or_smaller( 80 )
+      Console.error.println "=" * w
+      Console.error.println rogo_error->String.word_wrapped(w)
+      Console.error.println "=" * w
+      on_exit
+      System.exit 1
+
+    method on_command_found
+      noAction
+
+    method on_command_not_found
+      local w = Console.width.or_smaller( 80 )
+      println "=" * w
+      println "ERROR: No such command '$'." (rogo_args.first)
+      println "=" * w
+      println
+      rogo_command = "help"
+      rogo_args.clear
+      on_command_found
+
+    method on_launch
+      noAction
+
+    method on_exit
+      noAction
+
+    method parse_args
+      block
+        if (rogo_args.count)
+          local parts = String[]
+          parts.add( forEach in rogo_args )
+          rogo_args.clear
+
+          while (parts.count)
+            local cmd = parts.join("_")
+            if (find_command(cmd))
+              rogo_command = cmd
+              on_command_found
+              escapeBlock
+            endIf
+            rogo_args.insert( parts.remove_last )
+          endWhile
+
+          on_command_not_found
+        endIf
+
+        # Use default command
+        on_command_found
+      endBlock
+
+    method read_defs
+      read_defs( LOCAL_SETTINGS_FILE )
+
+    method read_defs( defs_filepath:String )
+      # Attempt to read defs from Local.rogo
+      local overrides = String[]
+      if (File(defs_filepath).exists)
+        forEach (line in LineReader(File(defs_filepath)))
+          if (line.contains("="))
+            local name  = line.before_first('=').trimmed
+            local value = line.after_first('=').trimmed
+            if (value.begins_with('"') or value.begins_with('\''))
+              value = value.leftmost(-1).rightmost(-1)
+            endIf
+            local p = <<Build>>.find_property( name )
+            if (p)
+              overrides.add( "$ = $" (name,value) )
+              p.set_value( this, value )
+            endIf
+          endIf
+        endForEach
+      endIf
+
+    method _join( value:Value )->String
+      local args = String[]
+      args.add( forEach in value )
+      return args.join( "_" )
+endClass
+
+
+routine rogo_help( command="":String )
+  # SYNTAX: rogo help [command]
+  # Displays help for a specified command or else all build commands.
+  command = Build._join( Build.rogo_args )
+  if (command.count)
+    local syntax = get_syntax( command )
+    local success = false
+    if (syntax)
+      println "SYNTAX"
+      println "  " + syntax
+      println
+      success = true
+    endIf
+    local description = get_description( command )
+    if (description)
+      description .= replacing("<br>","\n")
+      local max_w = Console.width - 2
+      println "DESCRIPTION"
+      forEach (line in LineReader(description.word_wrapped(max_w)))
+        print( "  " )
+        println( line )
+      endForEach
+      println
+      success = true
+    endIf
+    if (success)
+      return
+    else
+      local w = Console.width.or_smaller( 80 )
+      println "=" * w
+      println "ERROR: No such command '$'." (command)
+      println "=" * w
+      println
+    endIf
+  endIf
+
+  println "USAGE"
+  local entries = CommandInfo[]
+  local max_len = 0
+  forEach (m in <<Routine>>.global_methods)
+    if (m.name.begins_with(Build.rogo_prefix))
+      local name = m.name.after_first( Build.rogo_prefix )
+      local entry = CommandInfo( name, get_syntax(name), get_description(name) )
+      max_len .= or_larger( entry.syntax.count )
+      entries.add entry
+    endIf
+  endForEach
+
+  entries.sort( $1.name < $2.name )
+  max_len += 2
+
+  local max_w = Console.width
+  forEach (entry in entries)
+    print "  " + entry.syntax
+    if (entry.@description)
+      local description = entry.@description.before_first( '\n' )
+      loop (max_len - entry.syntax.count) print ' '
+      contingent
+        sufficient (2 + max_len + description.count <= max_w)
+        if (description.contains(". "))
+          description = description.before_first( ". " ) + "."
+          sufficient (max_len + description.count <= max_w)
+        endIf
+        necessary (max_len + 10 <= max_w)
+        description = description.unright( (description.count - (max_w - max_len))+5 ) + "..."
+      satisfied
+        print description
+      endContingent
+    endIf
+    println
+  endForEach
+  println
+endRoutine
+
+routine get_syntax( m_name:String )->String
+  if (Build.rogo_syntax.contains(m_name))
+    return "rogo " + Build.rogo_syntax[ m_name ]
+  else
+    local m = <<Routine>>.find_global_method( Build.rogo_prefix + m_name )
+    if (not m) return null
+    local line = "rogo $" (m_name.replacing('_',' '))
+    line += " <$>" ((forEach in m.parameters).name)
+    return line
+  endIf
+endRoutine
+
+
+routine get_description( m_name:String )->String
+  if (Build.rogo_descriptions.contains(m_name))
+    return Build.rogo_descriptions[ m_name ]
+  else
+    return null
+  endIf
+endRoutine
+
+class CommandInfo( name:String, syntax:String, description:String );
