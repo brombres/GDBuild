@@ -5,7 +5,7 @@ Rogo-based buildscript to supplement Godot's SCons-based build system.
 
 About     | Current Release
 ----------|-----------------------
-Version   | 0.1 (in development)
+Version   | 0.2 (in development)
 Date      | July 4, 2023
 Platforms | Windows, macOS, Linux
 License   | [MIT License](LICENSE)
@@ -37,12 +37,14 @@ Supplements Godot's existing SCons-based build system with additional convenienc
 2. Clone the [Godot engine repo](https://github.com/godotengine/godot) and `git checkout` your preferred version branch, e.g. `4.0`.
 3. Copy [BuildCore.rogue](BuildCore.rogue) to the Godot repo.
 4. Run `rogo`, `rogo help`, etc.
-5. Optionally add the following files to `.gitignore`:
+5. Add the following files to `.gitignore`:
 
         # Rogo
         .rogo
         Local.rogo
         BuildLocal.rogue
+        /Build
+        /Libraries
 
 # Reference
 - RoGodot development repo:<br>[https://github.com/brombres/godot/tree/feature/rogodot](https://github.com/brombres/godot/tree/feature/rogodot).
