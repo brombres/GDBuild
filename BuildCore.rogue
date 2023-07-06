@@ -10,10 +10,13 @@ uses Utility/FilePatcher
 uses Utility/VersionNumber
 
 augment Build
-  # You can create a Local.rogo file with overrides for these values, e.g.:
+  # You can either change these values here or you can create a Local.rogo file with overrides for
+  # them, e.g.:
   #   AUTOLAUNCH = "path/to/project/folder"
   PROPERTIES
-    AUTOLAUNCH = ""  # Godot project path to auto-launch after a default 'rogo' build.
+    AUTOLAUNCH   = ""  # Godot project path to auto-launch after a default 'rogo' build.
+    SPINE_REPO   = "https://github.com/EsotericSoftware/spine-runtimes.git"  # set to "" to omit Spine module
+    MODULES      = @[]  # additional module filepaths
 endAugment
 
 routine rogo_default
@@ -125,6 +128,8 @@ routine build( targets:String )
           endIf
           if (System.is_macos) cmd .= appending( "vulkan_sdk_path=Libraries/MoltenVK" )
           if (make_dist and mode == "release") cmd .= appending( "production=yes" )
+          local modules = "Libraries/Modules".appending( Build.MODULES.to_list<<String>>.join(','), ',' )
+          cmd .= appending( 'custom_modules="$"'(modules) )
           execute cmd
         endForEach
       endForEach
@@ -252,45 +257,45 @@ routine rogo_version( new_version="":String, new_status="":String )
   block patcher = FilePatcher( File("version.py") )
     local parts = v.split( '.' )
     while (parts.count < 3) parts.add( '0' )
-    patcher.replace( "major =", "major = $"(parts[0]) )
-    patcher.replace( "minor =", "minor = $"(parts[1]) )
-    patcher.replace( "patch =", "patch = $"(parts[2]) )
-    if (String.exists(new_status)) patcher.replace( "status =", ''status = "$"''(new_status) )
+    patcher.replace_line( "major =", "major = $"(parts[0]) )
+    patcher.replace_line( "minor =", "minor = $"(parts[1]) )
+    patcher.replace_line( "patch =", "patch = $"(parts[2]) )
+    if (String.exists(new_status)) patcher.replace_line( "status =", ''status = "$"''(new_status) )
     patcher.save
   endBlock
 
   block patcher = FilePatcher( File("misc/dist/macos_tools.app/Contents/Info.plist") )
     if local i = patcher.locate( "<key>CFBundleShortVersionString</key>" )
-      patcher.replace( i+1, "<string>$</string>"(v) )
+      patcher.replace_line( i+1, "<string>$</string>"(v) )
     endIf
     if local i = patcher.locate( "<key>CFBundleVersion</key>" )
-      patcher.replace( i+1, "<string>$</string>"(v) )
+      patcher.replace_line( i+1, "<string>$</string>"(v) )
     endIf
     patcher.save
   endBlock
 
   block patcher = FilePatcher( File("misc/dist/windows/godot.iss") )
-    patcher.replace( "#define MyAppVersion", ''#define MyAppVersion "$"''(v) )
+    patcher.replace_line( "#define MyAppVersion", ''#define MyAppVersion "$"''(v) )
     patcher.save
   endBlock
 
   block patcher = FilePatcher( File("modules/mono/editor/Godot.NET.Sdk/Godot.NET.Sdk/Godot.NET.Sdk.csproj") )
-    patcher.replace( "<Version>", "<Version>$</Version>"(v) )
+    patcher.replace_line( "<Version>", "<Version>$</Version>"(v) )
     patcher.save
   endBlock
 
   block patcher = FilePatcher( File("modules/mono/editor/Godot.NET.Sdk/Godot.SourceGenerators/Godot.SourceGenerators.csproj") )
-    patcher.replace( "<Version>", "<Version>$</Version>"(v) )
+    patcher.replace_line( "<Version>", "<Version>$</Version>"(v) )
     patcher.save
   endBlock
 
   block patcher = FilePatcher( File("modules/mono/glue/GodotSharp/GodotSharp/GodotSharp.csproj") )
-    patcher.replace( "<Version>", "<Version>$</Version>"(v) )
+    patcher.replace_line( "<Version>", "<Version>$</Version>"(v) )
     patcher.save
   endBlock
 
   block patcher = FilePatcher( File("modules/mono/glue/GodotSharp/GodotSharpEditor/GodotSharpEditor.csproj") )
-    patcher.replace( "<Version>", "<Version>$</Version>"(v) )
+    patcher.replace_line( "<Version>", "<Version>$</Version>"(v) )
     patcher.save
   endBlock
 
@@ -298,7 +303,9 @@ endRoutine
 
 routine rogo_deps
   # Installs any missing dependencies (specifically: MoltenVK on macOS).
+  File( "Libraries/Modules" ).create_folder
   install_moltenvk
+  install_spine
 endRoutine
 
 routine install_moltenvk( &rebuild )
@@ -328,6 +335,53 @@ routine install_moltenvk( &rebuild )
     header "Building MoltenVK for iOS Simulator"
     execute @|cd Libraries/MoltenVK && make iossim
   endIf
+endRoutine
+
+routine install_spine
+  if (not String.exists(Build.SPINE_REPO)) return
+
+  if (not File("Libraries/spine-runtimes").exists)
+    header "Cloning spine-runtimes"
+    local url = Build.SPINE_REPO
+    local cmd = "git clone"
+    if (url.contains('#'))
+      cmd .= appending( "-b $" (url.after_last('#')) )
+      url .= before_last( '#' )
+    endIf
+    cmd .= appending( url )
+    cmd .= appending( "Libraries/spine-runtimes" )
+    execute cmd
+  endIf
+
+  block patcher = FilePatcher( File("Libraries/spine-runtimes/spine-godot/spine_godot/SCsub") )
+    patcher.replace( "#../spine_godot/", "" )
+    if (patcher.is_modified) println "[PATCH] $"(patcher.file)
+    patcher.save
+  endBlock
+
+  block patcher = FilePatcher( File("Libraries/spine-runtimes/spine-godot/spine_godot/SpineAnimationTrack.cpp") )
+    patcher.replace( "godot/editor/editor_node", "editor/editor_node" )
+    if (patcher.is_modified) println "[PATCH] $"(patcher.file)
+    patcher.save
+  endBlock
+
+  block patcher = FilePatcher( File("Libraries/spine-runtimes/spine-godot/spine_godot/SpineSprite.cpp") )
+    if not patcher.locate( ''include "editor/editor_interface.h"'' )
+      if local index = patcher.locate( ''include "editor/editor_plugin.h"'' )
+        patcher.insert( ''#include "editor/editor_interface.h"'', index )
+        println "[PATCH] $"(patcher.file)
+        patcher.save
+      endIf
+    endIf
+  endBlock
+
+  local module_filepath = "Libraries/Modules/spine_godot"
+  block files = Files( "Libraries/spine-runtimes/spine-godot/spine_godot/**" )
+    files.sync_to( module_filepath, &verbose, &keep_unused )
+  endBlock
+  block files = Files( "Libraries/spine-runtimes/spine-cpp/spine-cpp/**" )
+    files.sync_to( module_filepath/"spine-cpp", &verbose, &keep_unused )
+  endBlock
 endRoutine
 
 routine supported_platforms->String[]
@@ -718,9 +772,14 @@ class Build [singleton]
         forEach (line in LineReader(File(defs_filepath)))
           if (line.contains("="))
             local name  = line.before_first('=').trimmed
-            local value = line.after_first('=').trimmed
-            if (value.begins_with('"') or value.begins_with('\''))
-              value = value.leftmost(-1).rightmost(-1)
+            local rhs   = line.after_first('=').trimmed
+            local value : Value
+            if (rhs.begins_with('"') or rhs.begins_with('\''))
+              value = rhs.leftmost(-1).rightmost(-1)
+            elseIf (rhs.begins_with('{') or rhs.begins_with('['))
+              value = JSON.parse( rhs )
+            else
+              value = rhs
             endIf
             local p = <<Build>>.find_property( name )
             if (p)

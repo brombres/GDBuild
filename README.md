@@ -5,7 +5,7 @@ Rogo-based buildscript to supplement Godot's SCons-based build system.
 
 About     | Current Release
 ----------|-----------------------
-Version   | 0.2 (in development)
+Version   | 0.3 (in development)
 Date      | July 4, 2023
 Platforms | Windows, macOS, Linux
 License   | [MIT License](LICENSE)
