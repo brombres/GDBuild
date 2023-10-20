@@ -2,27 +2,68 @@
 # to this folder and type "rogo" at the command line, or "rogo help" for a list
 # of supported commands.
 
+#$ LIBRARIES(Linux) = scons
 #$ LIBRARIES(macOS) = scons
 
 $requireRogue "2.18"
 
 uses Utility/FilePatcher
+uses Utility/GitIgnorePatcher
 uses Utility/VersionNumber
 
 augment Build
-  # You can either change these values here or you can create a Local.rogo file with overrides for
-  # them, e.g.:
+  # You can change these values:
+  # - Here
+  # - Create a Local.rogo file with overrides for them, e.g.:
   #   AUTOLAUNCH = "path/to/project/folder"
+  # - Change them with a global-scope assignment in Build.rogue or BuildLocal.rogue
   PROPERTIES
-    AUTOLAUNCH   = ""  # Godot project path to auto-launch after a default 'rogo' build.
-    SPINE_REPO   = "https://github.com/EsotericSoftware/spine-runtimes.git"  # set to "" to omit Spine module
-    MODULES      = @[]  # additional module filepaths
+    AUTOLAUNCH = ""  # Godot project path to auto-launch after a default 'rogo' build.
+    MODULES    = @[]  # additional module filepaths
+
+    config     = which{ JSON.load("Config.json") || @{} } : Value
+    libraries  = Library[]
+
+  METHODS
+    method save_config
+      local file = File("Config.json")
+      local json = config.to_json( &formatted ) + "\n"
+      if (file.exists and String(file) == json) return
+      File("Config.json").save( json )
 endAugment
 
 routine rogo_default
-  # Builds and runs the editor for the current platform.
-  build( "editor" )
-  rogo_run
+  rogo_libs
+  rogo_help
+endRoutine
+
+routine rogo_libs
+  File( "Libraries/Modules" ).create_folder
+
+  block patcher = GitIgnorePatcher( File(".gitignore") )
+    patcher.add( "# RoGodot", "/Build" )
+    patcher.add( "# RoGodot", "/Libraries" )
+    patcher.save( &verbose )
+  endBlock
+
+  if (not File("Libraries").exists)
+    File("Libraries").create_folder
+  endIf
+
+  (forEach in Build.libraries).ref?.configure
+endRoutine
+
+routine rogo_update( name=null:String )
+  rogo_libs
+  if (String.exists(name))
+    if local lib = Build.libraries.find( $.has_name(name) )
+      lib.update
+    else
+      println "[update] No such library: $"(name)
+    endIf
+  else
+    (forEach in Build.libraries).ref?.update
+  endIf
 endRoutine
 
 # 'rogo help build' custom per-OS description
@@ -65,7 +106,7 @@ routine rogo_build
 endRoutine
 
 routine build( targets:String )
-  rogo_deps
+  rogo_libs
 
   local config = BuildConfig( targets )
   local make_dist = config.make_dist
@@ -95,8 +136,8 @@ routine build( targets:String )
       if (product == "editor" and not BuildConfig.EDITOR_PLATFORMS.contains(platform)) nextIteration
       local architectures = config.architectures
       if (architectures.is_empty)
-        if (make_dist or product == "template") architectures = all_architectures( platform )
-        else                                    architectures = String[][null]
+        if (make_dist or product == "templates") architectures = all_architectures( platform )
+        else                                     architectures = String[][null]
       endIf
       forEach (architecture in architectures)
         local modes = config.modes
@@ -109,28 +150,36 @@ routine build( targets:String )
           endIf
         endIf
         forEach (mode in modes)
-          local platform_name = BuildConfig.PLATFORM_NAMES[platform]
-          which (platform)
-          endWhich
-          local product_name = which{ product=="editor":"editor" || "export template" }
-          local arch = which{ architecture || "" }
-          local is_sim = platform == "ios" and arch == "x86_64"
-          local sim = which{ is_sim:"simulator" || "" }
-          header "Building $ $ [$]"(platform_name,product_name,arch.appending(mode).appending(sim))
+          local sim_flags = which{ platform=="ios" and product=="templates":[false,true] || [false] }
+          forEach (is_sim in sim_flags)
+            local platform_name = BuildConfig.PLATFORM_NAMES[platform]
+            local product_name = which{ product=="editor":"editor" || "export template" }
+            local arch = which{ architecture || "" }
+            if (platform == "ios" and arch == "x86_64" and not is_sim) nextIteration
 
-          local cmd = "scons platform=$"(platform)
-          if (arch != "") cmd .= appending( "arch=$"(arch) )
-          if (product == "editor")
-            cmd .= appending( "target=editor" )
-          else
-            cmd .= appending( "target=template_$"(mode) )
-            if (is_sim) cmd .= appending( "ios_simulator=yes" )
-          endIf
-          if (System.is_macos) cmd .= appending( "vulkan_sdk_path=Libraries/MoltenVK" )
-          if (make_dist and mode == "release") cmd .= appending( "production=yes" )
-          local modules = "Libraries/Modules".appending( Build.MODULES.to_list<<String>>.join(','), ',' )
-          cmd .= appending( 'custom_modules="$"'(modules) )
-          execute cmd
+            local sim = which{ is_sim:"simulator" || "" }
+            header "Building $ $ [$]"(platform_name,product_name,arch.appending(mode).appending(sim))
+
+            local cmd = "cd Libraries/godot && scons platform=$"(platform)
+            if (arch != "") cmd .= appending( "arch=$"(arch) )
+            if (product == "editor")
+              cmd .= appending( "target=editor" )
+            else
+              cmd .= appending( "target=template_$"(mode) )
+              if (is_sim) cmd .= appending( "ios_simulator=yes" )
+            endIf
+            if (System.is_macos) cmd .= appending( "vulkan_sdk_path=../../Libraries/MoltenVK" )
+            if (make_dist and mode == "release") cmd .= appending( "production=yes" )
+
+            local modules = String[]
+            forEach (lib in Build.libraries)
+              local mod = lib.gd_module
+              if (mod) modules.add( "../.."/mod )
+            endForEach
+            if (modules.count) cmd .= appending( 'custom_modules="$"'(modules.join(',')) )
+
+            execute cmd
+          endForEach
         endForEach
       endForEach
     endForEach
@@ -139,7 +188,7 @@ routine build( targets:String )
   #rogo_sync_templates
 
   if (make_dist)
-    package
+    package( config )
   endIf
 endRoutine
 
@@ -148,27 +197,124 @@ routine rogo_dist
   build( System.command_line_arguments.cloned.join( '.' ) )  # includes 'dist' target
 endRoutine
 
-routine package
+routine rogo_package
+  package( BuildConfig(System.command_line_arguments.cloned.[remove_first].join( '.' )) )
+endRoutine
+
+routine rogo_install
+  install( BuildConfig(System.command_line_arguments.cloned.[remove_first].join( '.' )) )
+endRoutine
+
+routine introspection_call( sig:String )
+  forEach (m in <<Routine>>.global_methods)
+    if (m.signature == sig)
+      m.call
+      return
+    endIf
+  endForEach
+  throw Error( "[INTERNAL ERROR] Routine $ is undefined."(sig) )
+endRoutine
+
+routine package( config:BuildConfig )
+  rogo_libs
+  forEach (platform in config.platforms)
+    forEach (product in config.products)
+      if (product == "editor" and not BuildConfig.EDITOR_PLATFORMS.contains(platform)) nextIteration
+      introspection_call( "package_$_$()"(platform,product) )
+      if (config.install) introspection_call( "install_$_$()"(platform,product) )
+    endForEach
+  endForEach
+endRoutine
+
+routine install( config:BuildConfig )
+  forEach (platform in config.platforms)
+    forEach (product in config.products)
+      if (product == "editor" and not BuildConfig.EDITOR_PLATFORMS.contains(platform)) nextIteration
+      introspection_call( "install_$_$()"(platform,product) )
+    endForEach
+  endForEach
+endRoutine
+
+routine copy( source:File, destination:File )
+  assert source.exists
+  if (source.is_folder)
+    Files( source, "**" ).sync_to( destination, &verbose )
+  else
+    source.copy_to( destination, &verbose )
+  endIf
+endRoutine
+
+routine package_ios_templates
+  local folder = File( "Build/iOS/Templates" )
+  folder.delete
+  folder.create_folder
+
+  local godot = File("Libraries/godot")
+
+  Files( godot/"misc/dist/ios_xcode/**" ).sync_to( folder, &verbose )
+  copy (godot/"bin/libgodot.ios.template_debug.arm64.a", folder/"libgodot.ios.debug.xcframework/ios-arm64/libgodot.a" )
+
+  copy(
+  godot/"bin/libgodot.ios.template_debug.x86_64.simulator.a",
+    folder/"libgodot.ios.debug.xcframework/ios-arm64_x86_64-simulator/libgodot.a"
+  )
+
+  #local cmd = "lipo -create Libraries/godot/bin/libgodot.ios.template_debug.arm64.simulator.a"
+  #cmd .= appending( "Libraries/godot/bin/libgodot.ios.template_debug.x86_64.simulator.a" )
+  #cmd .= appending( "-output Build/iOS/Templates/libgodot.ios.debug.xcframework/ios-arm64_x86_64-simulator/libgodot.a" )
+  #execute cmd
+
+  copy(godot/"bin/libgodot.ios.template_release.arm64.a", folder/"libgodot.ios.release.xcframework/ios-arm64/libgodot.a" )
+
+  copy(
+    godot/"bin/libgodot.ios.template_release.x86_64.simulator.a",
+    folder/"libgodot.ios.release.xcframework/ios-arm64_x86_64-simulator/libgodot.a"
+  )
+  #cmd = "lipo -create Libraries/godot/bin/libgodot.ios.template_release.arm64.simulator.a"
+  #cmd .= appending( "Libraries/godot/bin/libgodot.ios.template_release.x86_64.simulator.a" )
+  #cmd .= appending( "-output Build/iOS/Templates/libgodot.ios.release.xcframework/ios-arm64_x86_64-simulator/libgodot.a" )
+  #execute cmd
+
+  copy( File("Libraries/MoltenVK/Package/Release/MoltenVK/MoltenVK.xcframework"), folder/"MoltenVK.xcframework" )
+
+  File( "Build/iOS/ios.zip" ).delete
+  execute @|(cd Build/iOS/Templates && zip -r ../ios.zip *)
+endRoutine
+
+routine install_ios_templates
+  local file = File( "Build/iOS/ios.zip" )
+  assert file.exists
+
+  localize templates_folder
+  assert templates_folder.parent.exists
+  templates_folder.create_folder
+  file.copy_to( templates_folder, &verbose )
+
+endRoutine
+
+routine templates_folder->File
   if (System.is_macos)
-    package_macos
+    return File( "~/Library/Application Support/Godot/export_templates" / version )
   else
     trace "TODO"
+    throw Error( "[INTERNAL ERROR] Templates folder not defined for $."(System.os) )
   endIf
 endRoutine
 
 routine package_macos
-  if (Files("bin/godot.macos.editor.*").any_newer_than("bin/godot.macos.editor.universal"))
+  local godot = File("Libraries/godot")
+  if (Files(godot/"bin/godot.macos.editor.*").any_newer_than(godot/"bin/godot.macos.editor.universal"))
     header "Building editor [macOS universal binary]"
-    execute @|lipo -create bin/godot.macos.editor.x86_64 bin/godot.macos.editor.arm64 -output bin/godot.macos.editor.universal
+    execute @|cd Libraries/godot && lipo -create bin/godot.macos.editor.x86_64 bin/godot.macos.editor.arm64 -output bin/godot.macos.editor.universal
   endIf
 
   local folder = File( "Build/macOS" )
   folder.create_folder
   (folder/"Godot.app/Contents/MacOS").create_folder
 
-  Files( "misc/dist/macos_tools.app/**" ).sync_to( File("Build/macOS/Godot.app"), &keep_unused, &verbose )
+  Files( godot/"misc/dist/macos_tools.app/**" ).sync_to( File("Build/macOS/Godot.app"), &keep_unused, &verbose )
 
-  execute @|cp bin/godot.macos.editor.universal Build/macOS/Godot.app/Contents/MacOS/Godot
+  execute @|cp Libraries/godot/bin/godot.macos.editor.universal Build/macOS/Godot.app/Contents/MacOS/Godot
   execute @|chmod +x Build/macOS/Godot.app/Contents/MacOS/Godot
   header "Build Complete: Build/macOS/Godot.app"
 endRoutine
@@ -186,9 +332,10 @@ routine rogo_run
   # Runs the most recent editor build for the current platform. If file Local.rogo exists and
   # contains the line 'AUTOLAUNCH = "path/to/project/folder"', that project will be opened when the
   # editor runs.
+  local godot = File( "Libraries/godot" )
   if (System.is_macos)
-    local exe_arch = File( "bin/godot.macos.editor.$"(Process.run("uname -m",&env)->String.trimmed) )
-    local exe_universal = File( "bin/godot.macos.editor.universal" )
+    local exe_arch = godot/"bin/godot.macos.editor.$"(Process.run("uname -m",&env)->String.trimmed)
+    local exe_universal = godot/"bin/godot.macos.editor.universal"
     local exe : File
     if (exe_arch.exists)
       if (exe_universal.exists)
@@ -227,7 +374,7 @@ endRoutine
 
 routine rogo_clean
   # Deletes the 'bin', 'Build' and '.rogo' folders.
-  forEach (folder in ["bin","Build",".rogo"])
+  forEach (folder in ["Libraries/godot/bin","Build",".rogo"])
     local file = File( folder )
     if (file.exists)
       println "[DELETE] $"(folder)
@@ -237,14 +384,15 @@ routine rogo_clean
 endRoutine
 
 routine version->String
-  local v = String( File("version.py") )
+  local v = String( File("Libraries/godot/version.py") )
   local parts = v.extract_strings( "*major = $(I)*minor = $(I)*patch = $(I)*" )
   local status = v.extract_string( ''*status = "$"*'' )
+  if (parts.last == '0') parts.remove_last
   return "$.$"(parts.join('.'),status)
 endRoutine
 
 routine rogo_version( new_version="":String, new_status="":String )
-  # SYNTAX: rogo version [version [status]]
+  # SYNTAX: rogo version [x.y.z [status]]
   # Displays or changes the Godot version number in all applicable files.
   # Call without arguments to display the current version number.
   if (not String.exists(new_version))
@@ -254,7 +402,9 @@ routine rogo_version( new_version="":String, new_status="":String )
 
   local v = new_version
 
-  block patcher = FilePatcher( File("version.py") )
+  local godot = File("Libraries/godot")
+
+  block patcher = FilePatcher( godot/"version.py" )
     local parts = v.split( '.' )
     while (parts.count < 3) parts.add( '0' )
     patcher.replace_line( "major =", "major = $"(parts[0]) )
@@ -264,7 +414,7 @@ routine rogo_version( new_version="":String, new_status="":String )
     patcher.save
   endBlock
 
-  block patcher = FilePatcher( File("misc/dist/macos_tools.app/Contents/Info.plist") )
+  block patcher = FilePatcher( godot/"misc/dist/macos_tools.app/Contents/Info.plist" )
     if local i = patcher.locate( "<key>CFBundleShortVersionString</key>" )
       patcher.replace_line( i+1, "<string>$</string>"(v) )
     endIf
@@ -274,114 +424,31 @@ routine rogo_version( new_version="":String, new_status="":String )
     patcher.save
   endBlock
 
-  block patcher = FilePatcher( File("misc/dist/windows/godot.iss") )
+  block patcher = FilePatcher( godot/"misc/dist/windows/godot.iss" )
     patcher.replace_line( "#define MyAppVersion", ''#define MyAppVersion "$"''(v) )
     patcher.save
   endBlock
 
-  block patcher = FilePatcher( File("modules/mono/editor/Godot.NET.Sdk/Godot.NET.Sdk/Godot.NET.Sdk.csproj") )
+  block patcher = FilePatcher( godot/"modules/mono/editor/Godot.NET.Sdk/Godot.NET.Sdk/Godot.NET.Sdk.csproj" )
     patcher.replace_line( "<Version>", "<Version>$</Version>"(v) )
     patcher.save
   endBlock
 
-  block patcher = FilePatcher( File("modules/mono/editor/Godot.NET.Sdk/Godot.SourceGenerators/Godot.SourceGenerators.csproj") )
+  block patcher = FilePatcher( godot/"modules/mono/editor/Godot.NET.Sdk/Godot.SourceGenerators/Godot.SourceGenerators.csproj" )
     patcher.replace_line( "<Version>", "<Version>$</Version>"(v) )
     patcher.save
   endBlock
 
-  block patcher = FilePatcher( File("modules/mono/glue/GodotSharp/GodotSharp/GodotSharp.csproj") )
+  block patcher = FilePatcher( godot/"modules/mono/glue/GodotSharp/GodotSharp/GodotSharp.csproj" )
     patcher.replace_line( "<Version>", "<Version>$</Version>"(v) )
     patcher.save
   endBlock
 
-  block patcher = FilePatcher( File("modules/mono/glue/GodotSharp/GodotSharpEditor/GodotSharpEditor.csproj") )
+  block patcher = FilePatcher( godot/"modules/mono/glue/GodotSharp/GodotSharpEditor/GodotSharpEditor.csproj" )
     patcher.replace_line( "<Version>", "<Version>$</Version>"(v) )
     patcher.save
   endBlock
 
-endRoutine
-
-routine rogo_deps
-  # Installs any missing dependencies (specifically: MoltenVK on macOS).
-  File( "Libraries/Modules" ).create_folder
-  install_moltenvk
-  install_spine
-endRoutine
-
-routine install_moltenvk( &rebuild )
-  if (not System.is_macos) return
-
-  if (not File("Libraries/MoltenVK").exists)
-    header "Cloning MoltenVK library"
-    execute @|git clone https://github.com/KhronosGroup/MoltenVK.git Libraries/MoltenVK
-  endIf
-
-  if (rebuild or not File("Libraries/MoltenVK/External").exists)
-    execute @|cd Libraries/MoltenVK && ./fetchDependencies --macos --ios --iossim
-  endIf
-
-  if (rebuild or not File("Libraries/MoltenVK/Package/Release/MoltenVK/MoltenVK.xcframework/macos-arm64_x86_64").exists)
-    header "Building MoltenVK for macOS"
-    local cmd = "cd Libraries/MoltenVK"
-    execute @|cd Libraries/MoltenVK && make macos
-  endIf
-
-  if (rebuild or not File("Libraries/MoltenVK/Package/Release/MoltenVK/MoltenVK.xcframework/ios-arm64").exists)
-    header "Building MoltenVK for iOS"
-    execute @|cd Libraries/MoltenVK && make ios
-  endIf
-
-  if (rebuild or not File("Libraries/MoltenVK/Package/Release/MoltenVK/MoltenVK.xcframework/ios-arm64_x86_64-simulator").exists)
-    header "Building MoltenVK for iOS Simulator"
-    execute @|cd Libraries/MoltenVK && make iossim
-  endIf
-endRoutine
-
-routine install_spine
-  if (not String.exists(Build.SPINE_REPO)) return
-
-  if (not File("Libraries/spine-runtimes").exists)
-    header "Cloning spine-runtimes"
-    local url = Build.SPINE_REPO
-    local cmd = "git clone"
-    if (url.contains('#'))
-      cmd .= appending( "-b $" (url.after_last('#')) )
-      url .= before_last( '#' )
-    endIf
-    cmd .= appending( url )
-    cmd .= appending( "Libraries/spine-runtimes" )
-    execute cmd
-  endIf
-
-  block patcher = FilePatcher( File("Libraries/spine-runtimes/spine-godot/spine_godot/SCsub") )
-    patcher.replace( "#../spine_godot/", "" )
-    if (patcher.is_modified) println "[PATCH] $"(patcher.file)
-    patcher.save
-  endBlock
-
-  block patcher = FilePatcher( File("Libraries/spine-runtimes/spine-godot/spine_godot/SpineAnimationTrack.cpp") )
-    patcher.replace( "godot/editor/editor_node", "editor/editor_node" )
-    if (patcher.is_modified) println "[PATCH] $"(patcher.file)
-    patcher.save
-  endBlock
-
-  block patcher = FilePatcher( File("Libraries/spine-runtimes/spine-godot/spine_godot/SpineSprite.cpp") )
-    if not patcher.locate( ''include "editor/editor_interface.h"'' )
-      if local index = patcher.locate( ''include "editor/editor_plugin.h"'' )
-        patcher.insert( ''#include "editor/editor_interface.h"'', index )
-        println "[PATCH] $"(patcher.file)
-        patcher.save
-      endIf
-    endIf
-  endBlock
-
-  local module_filepath = "Libraries/Modules/spine_godot"
-  block files = Files( "Libraries/spine-runtimes/spine-godot/spine_godot/**" )
-    files.sync_to( module_filepath, &verbose, &keep_unused )
-  endBlock
-  block files = Files( "Libraries/spine-runtimes/spine-cpp/spine-cpp/**" )
-    files.sync_to( module_filepath/"spine-cpp", &verbose, &keep_unused )
-  endBlock
 endRoutine
 
 routine supported_platforms->String[]
@@ -489,39 +556,176 @@ routine table( contents:String[][], total_w:Int32 )->String
   return builder
 endRoutine
 
-routine execute( commands:String, error_message=null:String, &suppress_error )->Logical
-  forEach (cmd in LineReader(commands))
-    print( "> " )
-    println( cmd )
-    if (0 != System.run(cmd))
-      if (suppress_error)
-        return false
+
+class Library
+  PROPERTIES
+    name      : String
+    folder    : File
+    repo      : String
+    branch    : String
+    gd_module : String
+    disabled  : Logical
+
+  METHODS
+    method init
+      Build.libraries.add( this )
+      disabled = config//disabled
+      if (config//folder)
+        folder = File( config//folder->String )
       else
-        if (not error_message) error_message = "Build failed."
-        throw Error( error_message )
+        config//folder = folder->String
+        save_config
       endIf
-    endIf
-  endForEach
-  return true
-endRoutine
+
+    method config->Value
+      if (not Build.config.contains(name))
+        Build.config[name] = @{}
+        save_config
+      endIf
+      return Build.config[name]
+
+    method configure
+      if (config//repo)
+        repo = config//repo
+        if (config//branch) branch = config//branch
+        else                branch = null
+
+      else
+        local message = "[$] Enter Git repo, repo#branch, #branch, or 'd' to disable."(name)
+        local default = ""
+        if (repo)
+          default = repo
+          if (branch) default += "#" + branch
+          message .= appending( "(default: $)"(default) )
+        endIf
+        message += ":"
+        ConsoleStyle.set<<FG_GREEN>>
+        println message
+        ConsoleStyle.reset
+
+        local input = Console.input( "> " )
+        if (not String.exists(input)) input = default
+
+        if (input == "d")
+          println "[$] Disabled. Edit Config.json to re-enable."(name)
+          config//disabled = true
+          save_config
+          return
+        endIf
+
+        if (String.exists(input))
+          if (input.begins_with('#'))
+            branch = input.unleft(1)
+          elseIf (input.contains('#'))
+            repo = input.before_last( '#' )
+            branch = input.after_last( '#' )
+          else
+            repo = input
+            branch = null
+          endIf
+          config//repo = repo
+          if (branch) config//branch = branch
+        endIf
+      endIf
+
+      if (not folder.exists)
+        header "Cloning $ repo"(name)
+        local cmd = "git clone $"(repo)
+
+        local maybe_commit = true
+        if (branch)
+          contingent
+            forEach (ch in branch)
+              necessary ch.is_number(16)
+            endForEach
+
+            # Could be a commit, a tag, or a branch
+
+          unsatisfied
+            # Definitely a tag or branch
+            cmd .= appending( "-b" )
+            cmd .= appending( branch )
+            maybe_commit = false
+          endContingent
+        endIf
+
+        cmd .= appending( folder.esc )
+
+        execute cmd
+        if (not folder.exists) System.exit(1)
+
+        if (branch)
+          if (maybe_commit)
+            execute "cd $ && git checkout $"(folder.esc,branch)
+          endIf
+        endIf
+
+      endIf
+
+      if (not branch)
+        # need to get branch name
+        local result = Process.run("cd $ && git status"(folder.esc),&env)->String
+        branch = result.split('\n').first.after_first("On branch ").trimmed
+        config//branch = branch
+      endIf
+
+      save_config
+
+    method ensure_no_local_repo_changes
+      if (not has_local_repo_changes) return
+      throw Error( "[$] $ has local changes - aborting."(name,folder) )
+
+    method has_local_repo_changes->Logical
+      local result = Process.run( "cd $ && git status --porcelain"(folder.esc), &env )
+      if (not result.success) return false
+      return (result->String.trimmed != "")
+
+    method has_name( n:String )->Logical
+      return n.equals( name, &ignore_case )
+
+    method pull_repo_changes
+      execute "cd $ && git pull"(folder.esc)
+
+    method needs_pull->Logical
+      return Process.run("cd $ && git status"(folder.esc))->String.contains("can be fast-forwarded")
+
+    method ref->Library
+      return which{ disabled:null->(as Library) || this }
+
+    method save_config
+      Build.save_config
+
+    method set_disabled( @disabled )
+      config//disabled = disabled
+      save_config
+
+    method update
+      ensure_no_local_repo_changes
+      println "[$]"(name)
+      execute "cd $ && git fetch --all"(folder.esc)
+      if (needs_pull) pull_repo_changes
+
+endClass
+
 
 class BuildConfig
   GLOBAL PROPERTIES
-    PRODUCTS         = ["editor","template","templates"]
+    PRODUCTS         = ["editor","templates"]
     EDITOR_PLATFORMS = ["linux","macos","uwp","web","windows"]
     PLATFORMS        = ["all","android","ios","javascript","js","linux","macos","uwp","web","windows"]
     ARCHITECTURES    = ["x86_32","x86_64","arm32","arm64","rv64","ppc32","ppc64","wasm32"]
     MODES            = ["debug","release","dist","distributable"]
-    ALIASES = { "distributable":"dist", "templates":"template", "javascript":"web", "js":"web" } : [String:String]
+    ALIASES = { "distributable":"dist", "template":"templates", "javascript":"web", "js":"web" } : [String:String]
     PLATFORM_NAMES = { "android":"Android", "ios":"iOS", "linux":"Linux", "macos":"macOS",
                        "uwp":"UWP", "web":"Web", "windows":"Windows" } : [String:String]
 
   PROPERTIES
-    products = String[]
-    platforms = String[]
+    products      = String[]
+    platforms     = String[]
     architectures = String[]
-    modes = String[]
-    make_dist : Logical
+    modes         = String[]
+    make_dist     : Logical
+    install       : Logical
 
   METHODS
     method init( target_string:String )
@@ -530,6 +734,11 @@ class BuildConfig
       localize supported_platforms
 
       local targets = target_string.split('.')
+      if (targets.contains("install"))
+        install = true
+        targets.remove( "install" )
+      endIf
+
       forEach (target in targets)
         if (target == "default") nextIteration
         if (target == "all")
@@ -563,7 +772,7 @@ class BuildConfig
 
       if (make_dist)
         if (platforms.is_empty) platforms.add( supported_platforms )
-        if (products.is_empty) products.[ add("editor"), add("template") ]
+        if (products.is_empty) products.[ add("editor"), add("templates") ]
       else
         if (platforms.is_empty) platforms.add( default_os )
         if (products.is_empty)
@@ -571,7 +780,7 @@ class BuildConfig
             necessary (EDITOR_PLATFORMS.contains(forEach in platforms))
             products.add( "editor" )
           unsatisfied
-            products.add( "template" )
+            products.add( "templates" )
           endContingent
         elseIf (products.contains("editor"))
           forEach (p in platforms)
@@ -593,6 +802,23 @@ class BuildConfig
       endIf
 
 endClass
+
+routine execute( commands:String, error_message=null:String, &suppress_error )->Logical
+  forEach (cmd in LineReader(commands))
+    print( "> " )
+    println( cmd )
+    if (0 != System.run(cmd))
+      if (suppress_error)
+        return false
+      else
+        if (not error_message) error_message = "Build failed."
+        throw Error( error_message )
+      endIf
+    endIf
+  endForEach
+  return true
+endRoutine
+
 
 #-------------------------------------------------------------------------------
 # Introspection-based Launcher Framework

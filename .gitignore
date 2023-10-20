@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Rogo
+.rogo
+BuildLocal.rogue
+Local.rogo
+
+# RoGodot
+/Libraries
+/Build
+
+# Vim
+*.swo
+*.swp

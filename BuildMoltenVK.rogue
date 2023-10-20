@@ -1,0 +1,43 @@
+class VulkanLibrary : Library [essential singleton]
+  PROPERTIES
+    name     = "MoltenVK"
+    repo     = "https://github.com/KhronosGroup/MoltenVK.git"
+    branch   = "main"
+    folder   = File( "Libraries/MoltenVK" )
+
+  METHODS
+    method init
+      if (System.is_macos) prior.init
+
+    method configure [override]
+      prior.configure
+
+      if (not (folder/"External/build/Release").exists)
+        execute @|cd Libraries/MoltenVK && ./fetchDependencies --macos --ios --iossim
+      endIf
+
+      if (not (folder/"Package/Release/MoltenVK/MoltenVK.xcframework/macos-arm64_x86_64").exists)
+        header "Building MoltenVK for macOS"
+        local cmd = "cd Libraries/MoltenVK"
+        execute "cd $ && make macos"(folder.esc)
+      endIf
+
+      if (not (folder/"Package/Release/MoltenVK/MoltenVK.xcframework/ios-arm64").exists)
+        header "Building MoltenVK for iOS"
+        execute "cd $ && make ios"(folder.esc)
+      endIf
+
+      if (not (folder/"Package/Release/MoltenVK/MoltenVK.xcframework/ios-arm64_x86_64-simulator").exists)
+        header "Building MoltenVK for iOS Simulator"
+        execute "cd $ && make iossim"(folder.esc)
+      endIf
+
+    method has_name( n:String )->Logical [override]
+      return (n.equals(name,&ignore_case) or n.equals("Vulkan",&ignore_case))
+
+    method pull_repo_changes [override]
+      (folder/"External/build/Release").delete
+      (folder/"Package/Release").delete
+      prior.pull_repo_changes
+
+endClass

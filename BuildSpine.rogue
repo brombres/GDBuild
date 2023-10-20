@@ -1,0 +1,43 @@
+class SpineLibrary : Library [essential singleton]
+  PROPERTIES
+    name      = "Spine"
+    repo      = "https://github.com/EsotericSoftware/spine-runtimes.git"
+    folder    = File( "Libraries/spine-runtimes" )
+    gd_module = "Libraries/Modules/spine_godot"
+
+  METHODS
+    method configure [override]
+      prior.configure
+      if (disabled) return
+
+      block patcher = FilePatcher( folder/"spine-godot/spine_godot/SCsub" )
+        patcher.replace( "#../spine_godot/", "" )
+        if (patcher.is_modified) println "[Spine] Patch $"(patcher.file)
+        patcher.save
+      endBlock
+
+      block patcher = FilePatcher( folder/"spine-godot/spine_godot/SpineAnimationTrack.cpp" )
+        patcher.replace( "godot/editor/editor_node", "editor/editor_node" )
+        if (patcher.is_modified) println "[Spine] Patch $"(patcher.file)
+        patcher.save
+      endBlock
+
+      local module_filepath = "Libraries/Modules/spine_godot"
+      block files = Files( folder/"spine-godot/spine_godot/**" )
+        files.sync_to( module_filepath, &verbose, &keep_unused )
+      endBlock
+      block files = Files( folder/"spine-cpp/spine-cpp/**" )
+        files.sync_to( module_filepath/"spine-cpp", &verbose, &keep_unused )
+      endBlock
+
+    method ensure_no_local_repo_changes [override]
+      # Checkout/revert auto-patched files
+      Process.run( "cd $ && git checkout spine-godot/spine_godot/SCsub"(folder), &env )
+      Process.run( "cd $ && git checkout spine-godot/spine_godot/SpineAnimationTrack.cpp"(folder), &env )
+      prior.ensure_no_local_repo_changes
+
+    method gd_module->String
+      if (disabled) return null
+      return @gd_module
+endClass
+
