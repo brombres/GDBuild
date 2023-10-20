@@ -3,7 +3,7 @@ Rogo-based Godot engine build management tool.
 
 About     | Current Release
 ----------|-----------------------
-Version   | 0.4 (in development)
+Version   | 0.5 (in development)
 Date      | October 20, 2023
 Platforms | Windows, macOS, Linux
 License   | [MIT License](LICENSE)

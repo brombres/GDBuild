@@ -675,6 +675,10 @@ class Library
       if (not has_local_repo_changes) return
       throw Error( "[$] $ has local changes - aborting."(name,folder) )
 
+    method gd_module->String
+      if (disabled) return null
+      return @gd_module
+
     method has_local_repo_changes->Logical
       local result = Process.run( "cd $ && git status --porcelain"(folder.esc), &env )
       if (not result.success) return false

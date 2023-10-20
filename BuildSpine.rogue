@@ -36,8 +36,5 @@ class SpineLibrary : Library [essential singleton]
       Process.run( "cd $ && git checkout spine-godot/spine_godot/SpineAnimationTrack.cpp"(folder), &env )
       prior.ensure_no_local_repo_changes
 
-    method gd_module->String
-      if (disabled) return null
-      return @gd_module
 endClass
 
