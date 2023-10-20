@@ -1,4 +1,4 @@
-# RoGodot
+# GDBuild
 Rogo-based Godot engine build management tool.
 
 About     | Current Release
