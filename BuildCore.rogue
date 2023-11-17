@@ -254,31 +254,24 @@ routine package_ios_templates
   Files( godot/"misc/dist/ios_xcode/**" ).sync_to( folder, &verbose )
   copy (godot/"bin/libgodot.ios.template_debug.arm64.a", folder/"libgodot.ios.debug.xcframework/ios-arm64/libgodot.a" )
 
-  copy(
-  godot/"bin/libgodot.ios.template_debug.x86_64.simulator.a",
-    folder/"libgodot.ios.debug.xcframework/ios-arm64_x86_64-simulator/libgodot.a"
-  )
-
-  #local cmd = "lipo -create Libraries/godot/bin/libgodot.ios.template_debug.arm64.simulator.a"
-  #cmd .= appending( "Libraries/godot/bin/libgodot.ios.template_debug.x86_64.simulator.a" )
-  #cmd .= appending( "-output Build/iOS/Templates/libgodot.ios.debug.xcframework/ios-arm64_x86_64-simulator/libgodot.a" )
-  #execute cmd
+  local cmd = "lipo -create Libraries/godot/bin/libgodot.ios.template_debug.arm64.simulator.a"
+  cmd .= appending( "Libraries/godot/bin/libgodot.ios.template_debug.x86_64.simulator.a" )
+  cmd .= appending( "-output Build/iOS/Templates/libgodot.ios.debug.xcframework/ios-arm64_x86_64-simulator/libgodot.a" )
+  execute cmd
 
   copy(godot/"bin/libgodot.ios.template_release.arm64.a", folder/"libgodot.ios.release.xcframework/ios-arm64/libgodot.a" )
 
-  copy(
-    godot/"bin/libgodot.ios.template_release.x86_64.simulator.a",
-    folder/"libgodot.ios.release.xcframework/ios-arm64_x86_64-simulator/libgodot.a"
-  )
-  #cmd = "lipo -create Libraries/godot/bin/libgodot.ios.template_release.arm64.simulator.a"
-  #cmd .= appending( "Libraries/godot/bin/libgodot.ios.template_release.x86_64.simulator.a" )
-  #cmd .= appending( "-output Build/iOS/Templates/libgodot.ios.release.xcframework/ios-arm64_x86_64-simulator/libgodot.a" )
-  #execute cmd
+  cmd = "lipo -create Libraries/godot/bin/libgodot.ios.template_release.arm64.simulator.a"
+  cmd .= appending( "Libraries/godot/bin/libgodot.ios.template_release.x86_64.simulator.a" )
+  cmd .= appending( "-output Build/iOS/Templates/libgodot.ios.release.xcframework/ios-arm64_x86_64-simulator/libgodot.a" )
+  execute cmd
 
   copy( File("Libraries/MoltenVK/Package/Release/MoltenVK/MoltenVK.xcframework"), folder/"MoltenVK.xcframework" )
 
   File( "Build/iOS/ios.zip" ).delete
   execute @|(cd Build/iOS/Templates && zip -r ../ios.zip *)
+  header "iOS template packaged: Build/iOS/ios.zip"
+
 endRoutine
 
 routine install_ios_templates
